@@ -70,7 +70,7 @@ function sanitizeLog(value: string): string {
   let sanitized = value;
   for (const [name, secret] of [
     ["SOLANA_RPC_URL", process.env.SOLANA_RPC_URL],
-    ["OWNER_KEYPAIR_PATH", process.env.OWNER_KEYPAIR_PATH],
+    ["SOURCE_PRIVATE_KEY_BASE58", process.env.SOURCE_PRIVATE_KEY_BASE58],
   ] as const) {
     if (secret?.trim()) {
       sanitized = sanitized.split(secret.trim()).join(`[${name}]`);
@@ -113,6 +113,15 @@ async function confirmMainnet(operation: AtomicOperation): Promise<void> {
 async function main(): Promise<void> {
   const command = parseCommand(process.argv[2]);
   const config = parseConfig(process.env, command !== "quote");
+  let owner: ReturnType<typeof loadOwnerKeypair> | null = null;
+  if (command === "quote") {
+    delete process.env.SOURCE_PRIVATE_KEY_BASE58;
+  } else {
+    if (!config.expectedOwner) {
+      throw new Error("Signing configuration was not loaded");
+    }
+    owner = loadOwnerKeypair(process.env, config.expectedOwner);
+  }
 
   const quote = await prepareQuote(config);
   printQuote(quote);
@@ -122,13 +131,9 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (!config.ownerKeypairPath || !config.expectedOwner) {
+  if (!owner) {
     throw new Error("Signing configuration was not loaded");
   }
-  const owner = await loadOwnerKeypair(
-    config.ownerKeypairPath,
-    config.expectedOwner,
-  );
   const operation = await buildAtomicOperation(quote, owner);
   printOperation(operation);
 

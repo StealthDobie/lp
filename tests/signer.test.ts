@@ -1,48 +1,48 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-
 import { Keypair } from "@solana/web3.js";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import bs58 from "bs58";
+import { describe, expect, it } from "vitest";
 
 import { loadOwnerKeypair } from "../src/signer";
 
 describe("owner signer", () => {
-  let directory: string;
-  let path: string;
-  let owner: Keypair;
+  it("loads base58 key material matching the expected owner", () => {
+    const owner = Keypair.generate();
+    const env: NodeJS.ProcessEnv = {
+      SOURCE_PRIVATE_KEY_BASE58: bs58.encode(owner.secretKey),
+    };
 
-  beforeEach(async () => {
-    directory = await mkdtemp(join(tmpdir(), "stealthdobie-lp-"));
-    path = join(directory, "owner.json");
-    owner = Keypair.generate();
-    await writeFile(path, JSON.stringify(Array.from(owner.secretKey)), {
-      mode: 0o600,
-    });
-  });
+    const loaded = loadOwnerKeypair(env, owner.publicKey);
 
-  afterEach(async () => {
-    await rm(directory, { recursive: true, force: true });
-  });
-
-  it("loads a mode-0600 keypair matching the expected owner", async () => {
-    const loaded = await loadOwnerKeypair(path, owner.publicKey);
     expect(loaded.publicKey.equals(owner.publicKey)).toBe(true);
+    expect(env.SOURCE_PRIVATE_KEY_BASE58).toBeUndefined();
   });
 
-  it.skipIf(process.platform === "win32")(
-    "rejects a keypair readable by other users",
-    async () => {
-      await chmod(path, 0o644);
-      await expect(loadOwnerKeypair(path, owner.publicKey)).rejects.toThrow(
-        "chmod 600",
-      );
-    },
-  );
+  it("rejects invalid key material without echoing it", () => {
+    const env: NodeJS.ProcessEnv = {
+      SOURCE_PRIVATE_KEY_BASE58: "not-base58",
+    };
+    expect(() =>
+      loadOwnerKeypair(env, Keypair.generate().publicKey),
+    ).toThrowError(/^SOURCE_PRIVATE_KEY_BASE58 is not valid base58$/);
+    expect(env.SOURCE_PRIVATE_KEY_BASE58).toBeUndefined();
+  });
 
-  it("rejects a signer that does not match EXPECTED_OWNER", async () => {
-    await expect(
-      loadOwnerKeypair(path, Keypair.generate().publicKey),
-    ).rejects.toThrow("Signer mismatch");
+  it("requires a complete 64-byte Solana keypair", () => {
+    expect(() =>
+      loadOwnerKeypair(
+        { SOURCE_PRIVATE_KEY_BASE58: bs58.encode(new Uint8Array(32)) },
+        Keypair.generate().publicKey,
+      ),
+    ).toThrow("decoded to 32 bytes; expected 64");
+  });
+
+  it("rejects a signer that does not match EXPECTED_OWNER", () => {
+    const owner = Keypair.generate();
+    expect(() =>
+      loadOwnerKeypair(
+        { SOURCE_PRIVATE_KEY_BASE58: bs58.encode(owner.secretKey) },
+        Keypair.generate().publicKey,
+      ),
+    ).toThrow("Signer mismatch");
   });
 });

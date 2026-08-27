@@ -1,52 +1,31 @@
-import { readFile, stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
-
 import { Keypair, PublicKey } from "@solana/web3.js";
+import bs58 from "bs58";
 
-function expandPath(path: string): string {
-  if (path === "~") {
-    return homedir();
-  }
-  if (path.startsWith("~/")) {
-    return resolve(homedir(), path.slice(2));
-  }
-  return resolve(path);
-}
-
-export async function loadOwnerKeypair(
-  configuredPath: string,
+export function loadOwnerKeypair(
+  env: NodeJS.ProcessEnv,
   expectedOwner: PublicKey,
-): Promise<Keypair> {
-  const path = expandPath(configuredPath);
-  const metadata = await stat(path);
-  if (!metadata.isFile()) {
-    throw new Error("OWNER_KEYPAIR_PATH must reference a regular file");
-  }
-  if (process.platform !== "win32" && (metadata.mode & 0o077) !== 0) {
+): Keypair {
+  const encoded = env.SOURCE_PRIVATE_KEY_BASE58?.trim();
+  delete env.SOURCE_PRIVATE_KEY_BASE58;
+  if (!encoded) {
     throw new Error(
-      "Owner keypair file must not be readable or writable by group/other users; use chmod 600",
+      "SOURCE_PRIVATE_KEY_BASE58 is required for simulate/submit",
     );
   }
 
-  let parsed: unknown;
+  let secretKey: Uint8Array;
   try {
-    parsed = JSON.parse(await readFile(path, "utf8"));
+    secretKey = bs58.decode(encoded);
   } catch {
-    throw new Error("Owner keypair file must contain a Solana JSON keypair");
+    throw new Error("SOURCE_PRIVATE_KEY_BASE58 is not valid base58");
   }
-  if (
-    !Array.isArray(parsed) ||
-    parsed.length !== 64 ||
-    !parsed.every(
-      (value) =>
-        Number.isInteger(value) && Number(value) >= 0 && Number(value) <= 255,
-    )
-  ) {
-    throw new Error("Owner keypair file must contain exactly 64 byte values");
+  if (secretKey.length !== 64) {
+    throw new Error(
+      `SOURCE_PRIVATE_KEY_BASE58 decoded to ${secretKey.length} bytes; expected 64`,
+    );
   }
 
-  const keypair = Keypair.fromSecretKey(Uint8Array.from(parsed as number[]));
+  const keypair = Keypair.fromSecretKey(secretKey);
   if (!keypair.publicKey.equals(expectedOwner)) {
     throw new Error(
       `Signer mismatch: keypair is ${keypair.publicKey.toBase58()}, expected ${expectedOwner.toBase58()}`,

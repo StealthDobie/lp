@@ -24,6 +24,7 @@ Requires Node.js 24+ and pnpm 11.
 ```bash
 pnpm install
 cp .env.example .env
+chmod 600 .env
 ```
 
 Install pnpm 11 first if `pnpm` is not already available.
@@ -41,19 +42,19 @@ Configure `.env`:
 ```dotenv
 SOLANA_RPC_URL=https://your-mainnet-rpc.example
 
-# Needed only by simulate/submit. Store a path, never key material.
-OWNER_KEYPAIR_PATH=/absolute/path/to/dedicated-owner.json
+# Needed only by simulate/submit. Never commit .env; use chmod 600 .env.
+SOURCE_PRIVATE_KEY_BASE58=YourBase58Encoded64ByteKeypair
 EXPECTED_OWNER=YourExpectedOwnerPublicKey
 
 DOBERMANN_AMOUNT=3000000
 VESTING_DAYS=90
 ```
 
-The signer must be a 64-byte Solana JSON keypair file with mode `0600`. The
-tool refuses a signer whose public key differs from `EXPECTED_OWNER`. Do not use
-a shared automation key or place private-key material directly in `.env`.
-That same owner must hold both the DOBERMANN and the quoted maximum SOL; the
-tool does not pull one side of the deposit from a second wallet.
+The tool decodes `SOURCE_PRIVATE_KEY_BASE58` only for `simulate` and `submit`,
+then removes it from the process environment. It must decode to a 64-byte Solana
+keypair whose public key matches `EXPECTED_OWNER`. That same owner must hold
+both the DOBERMANN and the quoted maximum SOL; the tool does not pull one side
+of the deposit from a second wallet.
 
 ## Commands
 

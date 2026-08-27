@@ -5,7 +5,6 @@ import { MAX_CONFIGURED_VESTING_DAYS } from "./constants";
 export type AppConfig = {
   rpcUrl: string;
   expectedOwner: PublicKey | null;
-  ownerKeypairPath: string | null;
   dobermannAmount: string;
   vestingDays: number;
 };
@@ -52,12 +51,9 @@ export function parseConfig(
       `VESTING_DAYS must be from 1 through ${MAX_CONFIGURED_VESTING_DAYS}`,
     );
   }
-  const ownerKeypairPath = env.OWNER_KEYPAIR_PATH?.trim() || null;
   const expectedOwnerText = env.EXPECTED_OWNER?.trim() || null;
-  if (requireSigner && (!ownerKeypairPath || !expectedOwnerText)) {
-    throw new Error(
-      "OWNER_KEYPAIR_PATH and EXPECTED_OWNER are required for simulate/submit",
-    );
+  if (requireSigner && !expectedOwnerText) {
+    throw new Error("EXPECTED_OWNER is required for simulate/submit");
   }
 
   let expectedOwner: PublicKey | null = null;
@@ -72,7 +68,6 @@ export function parseConfig(
   return {
     rpcUrl,
     expectedOwner,
-    ownerKeypairPath,
     dobermannAmount: required(env, "DOBERMANN_AMOUNT"),
     vestingDays,
   };

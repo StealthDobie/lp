@@ -11,13 +11,12 @@ const baseEnv: NodeJS.ProcessEnv = {
 describe("configuration", () => {
   it("keeps quote configuration minimal", () => {
     const config = parseConfig(baseEnv, false);
-    expect(config.ownerKeypairPath).toBeNull();
     expect(config.expectedOwner).toBeNull();
   });
 
   it("requires owner safeguards before signing", () => {
     expect(() => parseConfig(baseEnv, true)).toThrow(
-      "OWNER_KEYPAIR_PATH and EXPECTED_OWNER",
+      "EXPECTED_OWNER",
     );
   });
 
