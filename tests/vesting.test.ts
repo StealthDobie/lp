@@ -10,10 +10,10 @@ describe("daily vesting", () => {
   it("locks every liquidity unit and places only division dust at cliff", () => {
     const liquidity = new BN(1_003);
     const now = new BN(1_800_000_000);
-    const schedule = buildDailyVestingSchedule(liquidity, now, 7, 10);
+    const schedule = buildDailyVestingSchedule(liquidity, now, 10);
 
     expect(schedule.cliffPoint.toString()).toBe(
-      now.add(new BN(300 + 7 * 86_400)).toString(),
+      now.add(new BN(300)).toString(),
     );
     expect(schedule.liquidityPerPeriod.toString()).toBe("100");
     expect(schedule.cliffUnlockLiquidity.toString()).toBe("3");
@@ -24,7 +24,6 @@ describe("daily vesting", () => {
     const schedule = buildDailyVestingSchedule(
       new BN(90_000),
       new BN(1_800_000_000),
-      0,
       90,
     );
     expect(schedule.periodFrequency.toNumber()).toBe(86_400);
@@ -34,7 +33,7 @@ describe("daily vesting", () => {
 
   it("reserves landing time inside Meteora's ten-year limit", () => {
     expect(() =>
-      buildDailyVestingSchedule(new BN(1), new BN(1), 1, 3_649),
-    ).toThrow("cannot exceed 3649 days");
+      buildDailyVestingSchedule(new BN(3_650), new BN(1), 3_650),
+    ).toThrow("1 through 3649");
   });
 });

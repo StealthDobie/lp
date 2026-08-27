@@ -29,9 +29,12 @@ cp .env.example .env
 Install pnpm 11 first if `pnpm` is not already available.
 
 The lockfile upgrades compatible transitive `bn.js` and `uuid` releases. It
-also blocks `bigint-buffer`'s optional native build, keeping that dependency on
-its pure-JavaScript path because its native binding has an unpatched buffer
-overflow advisory.
+also patches `bigint-buffer` to force its bundled pure-JavaScript path and
+blocks its optional native build because the native binding has an
+[unpatched buffer-overflow advisory](https://github.com/advisories/GHSA-3gc7-fjrx-p6mg).
+Registry audits still identify the package version because upstream has no
+patched release; do not remove `patches/bigint-buffer@1.1.5.patch` or re-enable
+that package's build script.
 
 Configure `.env`:
 
@@ -44,15 +47,13 @@ EXPECTED_OWNER=YourExpectedOwnerPublicKey
 
 DOBERMANN_AMOUNT=3000000
 VESTING_DAYS=90
-
-# Optional defaults shown below.
-VESTING_CLIFF_DAYS=0
-LIQUIDITY_SLIPPAGE_BPS=50
 ```
 
 The signer must be a 64-byte Solana JSON keypair file with mode `0600`. The
 tool refuses a signer whose public key differs from `EXPECTED_OWNER`. Do not use
 a shared automation key or place private-key material directly in `.env`.
+That same owner must hold both the DOBERMANN and the quoted maximum SOL; the
+tool does not pull one side of the deposit from a second wallet.
 
 ## Commands
 
@@ -80,15 +81,18 @@ pnpm submit
 
 `submit` has no non-interactive confirmation mode.
 
+The deterministic transaction signature and last valid block height are printed
+before broadcast. If an RPC timeout or interruption leaves the outcome unclear,
+do not run `submit` again until mainnet has passed that height and the signature
+is still absent or failed on Solscan. A rerun creates a different position.
+
 ## Vesting behavior
 
-`VESTING_DAYS` creates equal daily releases. `VESTING_CLIFF_DAYS` delays the
-start. The tool places the initial vesting point five minutes after the live
-chain timestamp so it remains valid while the transaction is built and lands.
-The combined cliff and release duration is conservatively capped at 3,649 days
-inside Meteora's ten-year limit. All schedule points are on-chain Unix seconds,
-not JavaScript milliseconds. Integer division can leave a tiny liquidity-unit
-remainder; only that remainder is assigned to the cliff release so every quoted
+`VESTING_DAYS` creates equal daily releases. The vesting point starts five
+minutes after the live chain timestamp so it remains valid while the transaction
+is built and lands. The release duration is capped at 3,649 days inside
+Meteora's ten-year limit. Integer division can leave a tiny liquidity-unit
+remainder; that remainder is included at the starting point so every quoted
 liquidity unit is covered by vesting.
 
 The resulting position uses Meteora's embedded vesting state and has no
@@ -103,11 +107,12 @@ Meteora before withdrawal. Vesting does not prevent fee collection.
 - Uses Meteora's current on-chain quote and explicit maximum token debits.
 - Treats `DOBERMANN_AMOUNT` as a hard maximum; slippage headroom applies only
   to the matching SOL side.
-- Requires sufficient DOBERMANN in the owner's associated token account and
-  matching SOL plus a 0.05 SOL operating buffer.
 - Rejects an atomic transaction over Solana's packet-size limit rather than
   silently splitting deposit and vesting.
-- Simulates with signature verification before any confirmation prompt.
+- Simulates with signature verification before any confirmation prompt; an
+  insufficient DOBERMANN or SOL balance fails here without being submitted.
+- Prints the deterministic signature and expiry height before broadcast so an
+  ambiguous RPC outcome can be resolved safely before retrying.
 - Verifies after finality that all quoted liquidity is vested, none is
   permanently locked or unexpectedly unlocked, and the NFT belongs to the
   expected owner.

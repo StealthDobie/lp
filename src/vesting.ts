@@ -18,14 +18,10 @@ export type VestingSchedule = {
 export function buildDailyVestingSchedule(
   liquidity: BN,
   chainTimeSeconds: BN,
-  cliffDays: number,
   vestingDays: number,
 ): VestingSchedule {
   if (liquidity.lte(new BN(0))) {
     throw new Error("Liquidity must be greater than zero");
-  }
-  if (!Number.isInteger(cliffDays) || cliffDays < 0) {
-    throw new Error("Cliff days must be a non-negative integer");
   }
   if (
     !Number.isInteger(vestingDays) ||
@@ -36,19 +32,12 @@ export function buildDailyVestingSchedule(
       `Vesting days must be from 1 through ${MAX_CONFIGURED_VESTING_DAYS}`,
     );
   }
-  if (cliffDays + vestingDays > MAX_CONFIGURED_VESTING_DAYS) {
-    throw new Error(
-      `Cliff plus vesting cannot exceed ${MAX_CONFIGURED_VESTING_DAYS} days`,
-    );
-  }
-
   const numberOfPeriod = vestingDays;
   const periodFrequency = new BN(SECONDS_PER_DAY);
-  // An explicit point equal to quote time can already be in the past when the
-  // transaction lands. Start five minutes ahead, then apply any user cliff.
-  const cliffPoint = chainTimeSeconds
-    .add(new BN(VESTING_START_BUFFER_SECONDS))
-    .add(new BN(cliffDays).mul(periodFrequency));
+  // A point equal to quote time can be in the past when the transaction lands.
+  const cliffPoint = chainTimeSeconds.add(
+    new BN(VESTING_START_BUFFER_SECONDS),
+  );
   const liquidityPerPeriod = liquidity.div(new BN(numberOfPeriod));
   if (liquidityPerPeriod.isZero()) {
     throw new Error("Liquidity is too small for the requested daily schedule");

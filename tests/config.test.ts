@@ -11,9 +11,8 @@ const baseEnv: NodeJS.ProcessEnv = {
 describe("configuration", () => {
   it("keeps quote configuration minimal", () => {
     const config = parseConfig(baseEnv, false);
-    expect(config.vestingCliffDays).toBe(0);
-    expect(config.liquiditySlippageBps).toBe(50);
     expect(config.ownerKeypairPath).toBeNull();
+    expect(config.expectedOwner).toBeNull();
   });
 
   it("requires owner safeguards before signing", () => {
@@ -22,25 +21,15 @@ describe("configuration", () => {
     );
   });
 
-  it("rejects an excessive schedule", () => {
+  it("rejects an excessive vesting duration", () => {
     expect(() =>
       parseConfig(
         {
           ...baseEnv,
-          VESTING_DAYS: "3600",
-          VESTING_CLIFF_DAYS: "100",
+          VESTING_DAYS: "3650",
         },
         false,
       ),
-    ).toThrow("cannot exceed 3649");
-  });
-
-  it("rejects loose liquidity slippage", () => {
-    expect(() =>
-      parseConfig(
-        { ...baseEnv, LIQUIDITY_SLIPPAGE_BPS: "501" },
-        false,
-      ),
-    ).toThrow("0 through 500");
+    ).toThrow("1 through 3649");
   });
 });

@@ -8,8 +8,6 @@ export type AppConfig = {
   ownerKeypairPath: string | null;
   dobermannAmount: string;
   vestingDays: number;
-  vestingCliffDays: number;
-  liquiditySlippageBps: number;
 };
 
 function required(env: NodeJS.ProcessEnv, name: string): string {
@@ -20,19 +18,8 @@ function required(env: NodeJS.ProcessEnv, name: string): string {
   return value;
 }
 
-function integer(
-  env: NodeJS.ProcessEnv,
-  name: string,
-  defaultValue: number | null,
-): number {
-  const raw = env[name]?.trim();
-  if (!raw) {
-    if (defaultValue === null) {
-      throw new Error(`Missing required environment variable ${name}`);
-    }
-    return defaultValue;
-  }
-
+function integer(env: NodeJS.ProcessEnv, name: string): number {
+  const raw = required(env, name);
   if (!/^\d+$/.test(raw)) {
     throw new Error(`${name} must be a non-negative integer`);
   }
@@ -58,31 +45,13 @@ export function parseConfig(
     throw new Error("SOLANA_RPC_URL must use HTTPS unless it targets localhost");
   }
 
-  const vestingDays = integer(env, "VESTING_DAYS", null);
-  const vestingCliffDays = integer(env, "VESTING_CLIFF_DAYS", 0);
-  const liquiditySlippageBps = integer(
-    env,
-    "LIQUIDITY_SLIPPAGE_BPS",
-    50,
-  );
+  const vestingDays = integer(env, "VESTING_DAYS");
 
   if (vestingDays < 1 || vestingDays > MAX_CONFIGURED_VESTING_DAYS) {
     throw new Error(
       `VESTING_DAYS must be from 1 through ${MAX_CONFIGURED_VESTING_DAYS}`,
     );
   }
-  if (
-    vestingCliffDays < 0 ||
-    vestingCliffDays + vestingDays > MAX_CONFIGURED_VESTING_DAYS
-  ) {
-    throw new Error(
-      `VESTING_CLIFF_DAYS plus VESTING_DAYS cannot exceed ${MAX_CONFIGURED_VESTING_DAYS}`,
-    );
-  }
-  if (liquiditySlippageBps < 0 || liquiditySlippageBps > 500) {
-    throw new Error("LIQUIDITY_SLIPPAGE_BPS must be from 0 through 500");
-  }
-
   const ownerKeypairPath = env.OWNER_KEYPAIR_PATH?.trim() || null;
   const expectedOwnerText = env.EXPECTED_OWNER?.trim() || null;
   if (requireSigner && (!ownerKeypairPath || !expectedOwnerText)) {
@@ -106,7 +75,5 @@ export function parseConfig(
     ownerKeypairPath,
     dobermannAmount: required(env, "DOBERMANN_AMOUNT"),
     vestingDays,
-    vestingCliffDays,
-    liquiditySlippageBps,
   };
 }

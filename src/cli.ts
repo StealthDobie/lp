@@ -8,6 +8,7 @@ import {
   DOBERMANN_MINT,
   EXPECTED_DOBERMANN_DECIMALS,
   EXPECTED_SOL_DECIMALS,
+  LIQUIDITY_SLIPPAGE_BPS,
   METEORA_CP_AMM_PROGRAM,
   METEORA_POOL,
 } from "./constants";
@@ -49,16 +50,11 @@ function printQuote(quote: PreparedQuote): void {
     `SOL quote: ${formatUiAmount(quote.quotedSol, EXPECTED_SOL_DECIMALS)}`,
   );
   console.log(
-    `SOL authorized maximum: ${formatUiAmount(quote.maximumSol, EXPECTED_SOL_DECIMALS)} (${quote.config.liquiditySlippageBps} bps headroom)`,
+    `SOL authorized maximum: ${formatUiAmount(quote.maximumSol, EXPECTED_SOL_DECIMALS)} (${LIQUIDITY_SLIPPAGE_BPS} bps headroom)`,
   );
-  console.log(`Liquidity units: ${quote.liquidityDelta.toString(10)}`);
-  console.log(`Chain time: ${unixSecondsToIso(quote.chainTime)}`);
-  console.log(`Vesting cliff: ${unixSecondsToIso(quote.schedule.cliffPoint)}`);
+  console.log(`Vesting starts: ${unixSecondsToIso(quote.schedule.cliffPoint)}`);
   console.log(
     `Daily releases: ${quote.schedule.numberOfPeriod}; final release: ${unixSecondsToIso(quote.schedule.finalReleasePoint)}`,
-  );
-  console.log(
-    `Cliff rounding release: ${quote.schedule.cliffUnlockLiquidity.toString(10)} liquidity units`,
   );
 }
 
@@ -66,14 +62,23 @@ function printOperation(operation: AtomicOperation): void {
   console.log(`Owner: ${operation.owner.toBase58()}`);
   console.log(`Position: ${operation.position.toBase58()}`);
   console.log(`Position NFT mint: ${operation.positionNft.toBase58()}`);
-  console.log(`Serialized transaction: ${operation.serialized.length} bytes`);
-  console.log(
-    `Estimated network fee: ${operation.estimatedNetworkFeeLamports ?? "unavailable"} lamports`,
-  );
+  console.log(`Transaction signature: ${operation.signature}`);
+  console.log(`Last valid block height: ${operation.lastValidBlockHeight}`);
 }
 
 function sanitizeLog(value: string): string {
-  return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 1_000);
+  let sanitized = value;
+  for (const [name, secret] of [
+    ["SOLANA_RPC_URL", process.env.SOLANA_RPC_URL],
+    ["OWNER_KEYPAIR_PATH", process.env.OWNER_KEYPAIR_PATH],
+  ] as const) {
+    if (secret?.trim()) {
+      sanitized = sanitized.split(secret.trim()).join(`[${name}]`);
+    }
+  }
+  return sanitized
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, " ")
+    .slice(0, 1_000);
 }
 
 function confirmationPhrase(operation: AtomicOperation): string {
@@ -108,6 +113,7 @@ async function confirmMainnet(operation: AtomicOperation): Promise<void> {
 async function main(): Promise<void> {
   const command = parseCommand(process.argv[2]);
   const config = parseConfig(process.env, command !== "quote");
+
   const quote = await prepareQuote(config);
   printQuote(quote);
 

@@ -55,7 +55,3 @@ export function addBpsCeil(amount: BN, basisPoints: number): BN {
     .add(new BN(9_999))
     .div(new BN(10_000));
 }
-
-export function toBigInt(amount: BN): bigint {
-  return BigInt(amount.toString(10));
-}

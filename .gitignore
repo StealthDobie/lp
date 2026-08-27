@@ -6,6 +6,3 @@ node_modules/
 dist/
 coverage/
 *.log
-
-.lp-operation.json
-.lp-operation.*.tmp

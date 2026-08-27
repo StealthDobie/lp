@@ -11,16 +11,13 @@ import {
 import {
   NATIVE_MINT,
   TOKEN_2022_PROGRAM_ID,
-  type Mint,
   getAccount,
-  getAssociatedTokenAddressSync,
   getMint,
 } from "@solana/spl-token";
 import {
   Connection,
   Keypair,
   PublicKey,
-  Transaction,
   TransactionMessage,
   VersionedTransaction,
   type SimulatedTransactionResponse,
@@ -28,25 +25,18 @@ import {
 import BN from "bn.js";
 import bs58 from "bs58";
 
-import { addBpsCeil, parseUiAmount, toBigInt } from "./amount";
+import { addBpsCeil, parseUiAmount } from "./amount";
 import type { AppConfig } from "./config";
 import {
   DOBERMANN_MINT,
   EXPECTED_DOBERMANN_DECIMALS,
   EXPECTED_SOL_DECIMALS,
+  LIQUIDITY_SLIPPAGE_BPS,
   MAINNET_GENESIS_HASH,
   MAX_TRANSACTION_BYTES,
   METEORA_CP_AMM_PROGRAM,
   METEORA_POOL,
-  OPERATING_BUFFER_LAMPORTS,
 } from "./constants";
-import {
-  type PendingOperationRecord,
-  clearPendingOperation,
-  loadPendingOperation,
-  markPendingSubmitted,
-  savePendingOperation,
-} from "./journal";
 import {
   type VestingSchedule,
   buildDailyVestingSchedule,
@@ -59,14 +49,11 @@ export type PreparedQuote = {
   poolState: PoolState;
   tokenAProgram: PublicKey;
   tokenBProgram: PublicKey;
-  tokenAMint: Mint;
-  tokenBMint: Mint;
   tokenAmount: BN;
   quotedSol: BN;
   maximumSol: BN;
   liquidityDelta: BN;
   schedule: VestingSchedule;
-  chainTime: BN;
   config: AppConfig;
 };
 
@@ -81,24 +68,12 @@ export type AtomicOperation = {
   signature: string;
   blockhash: string;
   lastValidBlockHeight: number;
-  estimatedNetworkFeeLamports: number | null;
 };
 
 export type VerifiedReceipt = {
   signature: string;
   position: string;
   positionNft: string;
-  vestedLiquidity: string;
-  finalizedAt: string;
-};
-
-type OperationPostconditions = {
-  owner: PublicKey;
-  position: PublicKey;
-  positionNft: PublicKey;
-  positionNftAccount: PublicKey;
-  liquidityDelta: BN;
-  schedule: VestingSchedule;
 };
 
 function assertPublicKey(
@@ -205,12 +180,11 @@ export async function prepareQuote(config: AppConfig): Promise<PreparedQuote> {
   });
   const maximumSol = addBpsCeil(
     depositQuote.outputAmount,
-    config.liquiditySlippageBps,
+    LIQUIDITY_SLIPPAGE_BPS,
   );
   const schedule = buildDailyVestingSchedule(
     depositQuote.liquidityDelta,
     chainTime,
-    config.vestingCliffDays,
     config.vestingDays,
   );
   if (!scheduleTotalLiquidity(schedule).eq(depositQuote.liquidityDelta)) {
@@ -223,64 +197,19 @@ export async function prepareQuote(config: AppConfig): Promise<PreparedQuote> {
     poolState,
     tokenAProgram,
     tokenBProgram,
-    tokenAMint,
-    tokenBMint,
     tokenAmount: depositQuote.consumedInputAmount,
     quotedSol: depositQuote.outputAmount,
     maximumSol,
     liquidityDelta: depositQuote.liquidityDelta,
     schedule,
-    chainTime,
     config,
   };
-}
-
-async function assertFunding(quote: PreparedQuote, owner: PublicKey): Promise<void> {
-  const tokenAccount = getAssociatedTokenAddressSync(
-    DOBERMANN_MINT,
-    owner,
-    false,
-    quote.tokenAProgram,
-  );
-  const [tokenAccountInfo, solBalance] = await Promise.all([
-    quote.connection.getAccountInfo(tokenAccount, "confirmed"),
-    quote.connection.getBalance(owner, "confirmed"),
-  ]);
-
-  let tokenBalance = 0n;
-  if (tokenAccountInfo) {
-    const account = await getAccount(
-      quote.connection,
-      tokenAccount,
-      "confirmed",
-      quote.tokenAProgram,
-    );
-    assertPublicKey(account.owner, owner, "DOBERMANN token-account owner");
-    assertPublicKey(account.mint, DOBERMANN_MINT, "DOBERMANN token-account mint");
-    tokenBalance = account.amount;
-  }
-
-  if (tokenBalance < toBigInt(quote.tokenAmount)) {
-    throw new Error(
-      `Insufficient DOBERMANN in the owner's associated token account: have ${tokenBalance}, need ${quote.tokenAmount.toString(10)} raw units`,
-    );
-  }
-
-  const minimumSol =
-    toBigInt(quote.maximumSol) + BigInt(OPERATING_BUFFER_LAMPORTS);
-  if (BigInt(solBalance) < minimumSol) {
-    throw new Error(
-      `Insufficient SOL: have ${solBalance} lamports, need at least ${minimumSol} including the operating buffer`,
-    );
-  }
 }
 
 export async function buildAtomicOperation(
   quote: PreparedQuote,
   ownerSigner: Keypair,
 ): Promise<AtomicOperation> {
-  await assertFunding(quote, ownerSigner.publicKey);
-
   const positionNftSigner = Keypair.generate();
   const position = derivePositionAddress(positionNftSigner.publicKey);
   const positionNftAccount = derivePositionNftAccount(
@@ -341,7 +270,6 @@ export async function buildAtomicOperation(
   }
   const signature = bs58.encode(signatureBytes);
 
-  const fee = await quote.connection.getFeeForMessage(message, "confirmed");
   return {
     quote,
     owner: ownerSigner.publicKey,
@@ -353,7 +281,6 @@ export async function buildAtomicOperation(
     signature,
     blockhash,
     lastValidBlockHeight,
-    estimatedNetworkFeeLamports: fee.value,
   };
 }
 
@@ -373,9 +300,8 @@ export async function simulateAtomicOperation(
 
 async function verifyFinalizedOperation(
   operation: AtomicOperation,
-  signature: string,
 ): Promise<VerifiedReceipt> {
-  const { cpAmm, connection, liquidityDelta, schedule } = operation.quote;
+  const { connection, cpAmm, liquidityDelta, schedule } = operation.quote;
   const [positionState, positionNftAccount, externalVestings] =
     await Promise.all([
       cpAmm.fetchPositionState(operation.position),
@@ -403,6 +329,9 @@ async function verifyFinalizedOperation(
   if (positionNftAccount.amount !== 1n) {
     throw new Error("Position NFT account does not hold exactly one token");
   }
+  if (positionNftAccount.delegate !== null) {
+    throw new Error("Postcondition failed: position NFT has a delegate");
+  }
   if (!positionState.unlockedLiquidity.isZero()) {
     throw new Error("Postcondition failed: position has unlocked liquidity");
   }
@@ -428,11 +357,9 @@ async function verifyFinalizedOperation(
   }
 
   return {
-    signature,
+    signature: operation.signature,
     position: operation.position.toBase58(),
     positionNft: operation.positionNft.toBase58(),
-    vestedLiquidity: positionState.vestedLiquidity.toString(10),
-    finalizedAt: new Date().toISOString(),
   };
 }
 
@@ -446,27 +373,46 @@ export async function submitAtomicOperation(
     throw new Error("Simulated transaction blockhash expired; rerun submit");
   }
 
-  const signature = await operation.quote.connection.sendRawTransaction(
-    operation.serialized,
-    {
-      skipPreflight: false,
-      preflightCommitment: "confirmed",
-      maxRetries: 3,
-    },
-  );
-  const confirmation = await operation.quote.connection.confirmTransaction(
-    {
-      signature,
-      blockhash: operation.blockhash,
-      lastValidBlockHeight: operation.lastValidBlockHeight,
-    },
-    "finalized",
-  );
+  let confirmation;
+  try {
+    const returnedSignature =
+      await operation.quote.connection.sendRawTransaction(
+        operation.serialized,
+        {
+          skipPreflight: false,
+          preflightCommitment: "confirmed",
+          maxRetries: 3,
+        },
+      );
+    if (returnedSignature !== operation.signature) {
+      throw new Error("RPC returned an unexpected transaction signature");
+    }
+    confirmation = await operation.quote.connection.confirmTransaction(
+      {
+        signature: operation.signature,
+        blockhash: operation.blockhash,
+        lastValidBlockHeight: operation.lastValidBlockHeight,
+      },
+      "finalized",
+    );
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Submission outcome for ${operation.signature} is unknown. Do not run submit again until mainnet block height is above ${operation.lastValidBlockHeight} and the signature is still absent or failed at https://solscan.io/tx/${operation.signature}. Last error: ${message}`,
+    );
+  }
   if (confirmation.value.err) {
     throw new Error(
-      `Mainnet transaction failed: ${JSON.stringify(confirmation.value.err)}`,
+      `Mainnet transaction finalized with an error and was rolled back: ${JSON.stringify(confirmation.value.err)}`,
     );
   }
 
-  return verifyFinalizedOperation(operation, signature);
+  try {
+    return await verifyFinalizedOperation(operation);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Transaction ${operation.signature} finalized but position verification failed. Review it on Solscan; do not submit again. Last error: ${message}`,
+    );
+  }
 }
