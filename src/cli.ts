@@ -11,27 +11,43 @@ import {
   LIQUIDITY_SLIPPAGE_BPS,
   METEORA_CP_AMM_PROGRAM,
   METEORA_POOL,
+  METEORA_POSITION,
+  METEORA_POSITION_NFT,
 } from "./constants";
 import {
   type AtomicOperation,
+  type FeeClaimOperation,
+  type PositionFees,
   type PreparedQuote,
   buildAtomicOperation,
+  buildFeeClaimOperation,
+  inspectPositionFees,
   prepareQuote,
   simulateAtomicOperation,
+  simulateFeeClaimOperation,
   submitAtomicOperation,
+  submitFeeClaimOperation,
 } from "./meteora";
 import { loadOwnerKeypair } from "./signer";
 import { unixSecondsToIso } from "./vesting";
 
-type Command = "quote" | "simulate" | "submit";
+type Command = "quote" | "simulate" | "submit" | "fees" | "claim-fees";
 
 function usage(): never {
-  console.error("Usage: pnpm quote | pnpm simulate | pnpm submit");
+  console.error(
+    "Usage: pnpm quote | pnpm simulate | pnpm submit | pnpm fees | pnpm claim-fees",
+  );
   process.exit(2);
 }
 
 function parseCommand(value: string | undefined): Command {
-  if (value === "quote" || value === "simulate" || value === "submit") {
+  if (
+    value === "quote" ||
+    value === "simulate" ||
+    value === "submit" ||
+    value === "fees" ||
+    value === "claim-fees"
+  ) {
     return value;
   }
   return usage();
@@ -66,6 +82,27 @@ function printOperation(operation: AtomicOperation): void {
   console.log(`Last valid block height: ${operation.lastValidBlockHeight}`);
 }
 
+function printPositionFees(fees: PositionFees): void {
+  console.log("StealthDobie position fees");
+  console.log("Cluster: mainnet-beta");
+  console.log(`Meteora program: ${METEORA_CP_AMM_PROGRAM.toBase58()}`);
+  console.log(`Pool: ${METEORA_POOL.toBase58()}`);
+  console.log(`Position: ${METEORA_POSITION.toBase58()}`);
+  console.log(`Position NFT mint: ${METEORA_POSITION_NFT.toBase58()}`);
+  console.log(`Position NFT owner: ${fees.owner.toBase58()}`);
+  console.log(
+    `Claimable DOBERMANN: ${formatUiAmount(fees.claimableDobermann, EXPECTED_DOBERMANN_DECIMALS)}`,
+  );
+  console.log(
+    `Claimable SOL: ${formatUiAmount(fees.claimableSol, EXPECTED_SOL_DECIMALS)}`,
+  );
+}
+
+function printFeeClaimOperation(operation: FeeClaimOperation): void {
+  console.log(`Transaction signature: ${operation.signature}`);
+  console.log(`Last valid block height: ${operation.lastValidBlockHeight}`);
+}
+
 function sanitizeLog(value: string): string {
   let sanitized = value;
   for (const [name, secret] of [
@@ -95,12 +132,26 @@ function confirmationPhrase(operation: AtomicOperation): string {
   return `SUBMIT MAINNET ${pool.slice(-6)} ${owner.slice(-6)} ${amount} DOB ${maxSol} SOL ${operation.quote.config.vestingDays} DAYS`;
 }
 
-async function confirmMainnet(operation: AtomicOperation): Promise<void> {
+function feeClaimConfirmationPhrase(operation: FeeClaimOperation): string {
+  const owner = operation.owner.toBase58();
+  const pool = METEORA_POOL.toBase58();
+  const position = METEORA_POSITION.toBase58();
+  const dobermann = formatUiAmount(
+    operation.fees.claimableDobermann,
+    EXPECTED_DOBERMANN_DECIMALS,
+  );
+  const sol = formatUiAmount(
+    operation.fees.claimableSol,
+    EXPECTED_SOL_DECIMALS,
+  );
+  return `CLAIM MAINNET ${pool.slice(-6)} ${position.slice(-6)} ${owner.slice(-6)} ${dobermann} DOB ${sol} SOL`;
+}
+
+async function confirmMainnet(message: string, phrase: string): Promise<void> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    throw new Error("Submit requires an interactive terminal");
+    throw new Error("Mainnet submission requires an interactive terminal");
   }
-  const phrase = confirmationPhrase(operation);
-  console.log("\nThis will atomically deposit and vest liquidity on mainnet-beta.");
+  console.log(`\n${message}`);
   console.log(`Type exactly: ${phrase}`);
   const prompt = createInterface({ input: process.stdin, output: process.stdout });
   const answer = await prompt.question("> ");
@@ -112,15 +163,52 @@ async function confirmMainnet(operation: AtomicOperation): Promise<void> {
 
 async function main(): Promise<void> {
   const command = parseCommand(process.argv[2]);
-  const config = parseConfig(process.env, command !== "quote");
+  const readOnly = command === "quote" || command === "fees";
+  const config = parseConfig(process.env, !readOnly);
   let owner: ReturnType<typeof loadOwnerKeypair> | null = null;
-  if (command === "quote") {
+  if (readOnly) {
     delete process.env.SOURCE_PRIVATE_KEY_BASE58;
   } else {
     if (!config.expectedOwner) {
       throw new Error("Signing configuration was not loaded");
     }
     owner = loadOwnerKeypair(process.env, config.expectedOwner);
+  }
+
+  if (command === "fees" || command === "claim-fees") {
+    const fees = await inspectPositionFees(config);
+    printPositionFees(fees);
+    if (command === "fees") {
+      console.log("\nRead-only fee inspection complete. No signer was loaded.");
+      return;
+    }
+
+    if (!owner) {
+      throw new Error("Signing configuration was not loaded");
+    }
+    const operation = await buildFeeClaimOperation(fees, owner);
+    printFeeClaimOperation(operation);
+    const simulation = await simulateFeeClaimOperation(operation);
+    if (simulation.err) {
+      const logs = (simulation.logs ?? [])
+        .slice(-20)
+        .map(sanitizeLog)
+        .join("\n");
+      throw new Error(
+        `Simulation failed: ${JSON.stringify(simulation.err)}${logs ? `\n${logs}` : ""}`,
+      );
+    }
+    console.log(
+      `Simulation succeeded; compute units consumed: ${simulation.unitsConsumed ?? "unavailable"}`,
+    );
+    await confirmMainnet(
+      "This will claim all accrued fees to the position NFT owner on mainnet-beta without changing liquidity or vesting.",
+      feeClaimConfirmationPhrase(operation),
+    );
+    const receipt = await submitFeeClaimOperation(operation);
+    console.log("Finalized and verified:");
+    console.log(JSON.stringify(receipt, null, 2));
+    return;
   }
 
   const quote = await prepareQuote(config);
@@ -153,7 +241,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  await confirmMainnet(operation);
+  await confirmMainnet(
+    "This will atomically deposit and vest liquidity on mainnet-beta.",
+    confirmationPhrase(operation),
+  );
   const receipt = await submitAtomicOperation(operation);
   console.log("Finalized and verified:");
   console.log(JSON.stringify(receipt, null, 2));

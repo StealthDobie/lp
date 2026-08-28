@@ -3,10 +3,12 @@ import {
   CP_AMM_PROGRAM_ID,
   CpAmm,
   type PoolState,
+  type PositionState,
   derivePositionAddress,
   derivePositionNftAccount,
   getCurrentPoint,
   getTokenProgram,
+  getUnClaimLpFee,
 } from "@meteora-ag/cp-amm-sdk";
 import {
   NATIVE_MINT,
@@ -36,6 +38,8 @@ import {
   MAX_TRANSACTION_BYTES,
   METEORA_CP_AMM_PROGRAM,
   METEORA_POOL,
+  METEORA_POSITION,
+  METEORA_POSITION_NFT,
 } from "./constants";
 import {
   type VestingSchedule,
@@ -74,6 +78,35 @@ export type VerifiedReceipt = {
   signature: string;
   position: string;
   positionNft: string;
+};
+
+export type PositionFees = {
+  connection: Connection;
+  cpAmm: CpAmm;
+  poolState: PoolState;
+  positionState: PositionState;
+  tokenAProgram: PublicKey;
+  tokenBProgram: PublicKey;
+  positionNftAccount: PublicKey;
+  owner: PublicKey;
+  claimableDobermann: BN;
+  claimableSol: BN;
+};
+
+export type FeeClaimOperation = {
+  fees: PositionFees;
+  owner: PublicKey;
+  transaction: VersionedTransaction;
+  serialized: Uint8Array;
+  signature: string;
+  blockhash: string;
+  lastValidBlockHeight: number;
+};
+
+export type FeeClaimReceipt = {
+  signature: string;
+  position: string;
+  owner: string;
 };
 
 function assertPublicKey(
@@ -204,6 +237,257 @@ export async function prepareQuote(config: AppConfig): Promise<PreparedQuote> {
     schedule,
     config,
   };
+}
+
+export async function inspectPositionFees(
+  config: AppConfig,
+): Promise<PositionFees> {
+  const connection = new Connection(config.rpcUrl, {
+    commitment: "confirmed",
+    confirmTransactionInitialTimeout: 60_000,
+  });
+  const cpAmm = new CpAmm(connection);
+  const poolState = await verifyMainnetAndPool(connection, cpAmm);
+  const tokenAProgram = getTokenProgram(poolState.tokenAFlag);
+  const tokenBProgram = getTokenProgram(poolState.tokenBFlag);
+  const positionNftAccount = derivePositionNftAccount(METEORA_POSITION_NFT);
+
+  assertPublicKey(
+    derivePositionAddress(METEORA_POSITION_NFT),
+    METEORA_POSITION,
+    "Derived position",
+  );
+
+  const [
+    positionState,
+    positionNftTokenAccount,
+    tokenAMint,
+    tokenBMint,
+    tokenAVault,
+    tokenBVault,
+  ] = await Promise.all([
+    cpAmm.fetchPositionState(METEORA_POSITION),
+    getAccount(
+      connection,
+      positionNftAccount,
+      "confirmed",
+      TOKEN_2022_PROGRAM_ID,
+    ),
+    getMint(connection, poolState.tokenAMint, "confirmed", tokenAProgram),
+    getMint(connection, poolState.tokenBMint, "confirmed", tokenBProgram),
+    getAccount(connection, poolState.tokenAVault, "confirmed", tokenAProgram),
+    getAccount(connection, poolState.tokenBVault, "confirmed", tokenBProgram),
+  ]);
+
+  assertPublicKey(positionState.pool, METEORA_POOL, "Position pool");
+  assertPublicKey(positionState.nftMint, METEORA_POSITION_NFT, "Position NFT mint");
+  assertPublicKey(
+    positionNftTokenAccount.mint,
+    METEORA_POSITION_NFT,
+    "Position NFT account mint",
+  );
+  assertPublicKey(tokenAVault.mint, DOBERMANN_MINT, "Token A vault mint");
+  assertPublicKey(tokenBVault.mint, NATIVE_MINT, "Token B vault mint");
+  if (tokenAMint.decimals !== EXPECTED_DOBERMANN_DECIMALS) {
+    throw new Error(
+      `DOBERMANN decimals changed from ${EXPECTED_DOBERMANN_DECIMALS} to ${tokenAMint.decimals}`,
+    );
+  }
+  if (tokenBMint.decimals !== EXPECTED_SOL_DECIMALS) {
+    throw new Error(
+      `Wrapped SOL decimals changed from ${EXPECTED_SOL_DECIMALS} to ${tokenBMint.decimals}`,
+    );
+  }
+  if (positionNftTokenAccount.amount !== 1n) {
+    throw new Error("Position NFT account does not hold exactly one token");
+  }
+  if (positionNftTokenAccount.delegate !== null) {
+    throw new Error("Position NFT has a delegate; refusing to claim fees");
+  }
+  if (config.expectedOwner) {
+    assertPublicKey(
+      positionNftTokenAccount.owner,
+      config.expectedOwner,
+      "Position NFT owner",
+    );
+  }
+
+  const unclaimed = getUnClaimLpFee(poolState, positionState);
+  return {
+    connection,
+    cpAmm,
+    poolState,
+    positionState,
+    tokenAProgram,
+    tokenBProgram,
+    positionNftAccount,
+    owner: positionNftTokenAccount.owner,
+    claimableDobermann: unclaimed.feeTokenA,
+    claimableSol: unclaimed.feeTokenB,
+  };
+}
+
+export async function buildFeeClaimOperation(
+  fees: PositionFees,
+  ownerSigner: Keypair,
+): Promise<FeeClaimOperation> {
+  assertPublicKey(ownerSigner.publicKey, fees.owner, "Fee claim signer");
+  if (fees.claimableDobermann.isZero() && fees.claimableSol.isZero()) {
+    throw new Error("The position has no fees to claim");
+  }
+
+  const claim = await fees.cpAmm.claimPositionFee({
+    owner: ownerSigner.publicKey,
+    position: METEORA_POSITION,
+    pool: METEORA_POOL,
+    positionNftAccount: fees.positionNftAccount,
+    tokenAMint: fees.poolState.tokenAMint,
+    tokenBMint: fees.poolState.tokenBMint,
+    tokenAVault: fees.poolState.tokenAVault,
+    tokenBVault: fees.poolState.tokenBVault,
+    tokenAProgram: fees.tokenAProgram,
+    tokenBProgram: fees.tokenBProgram,
+  });
+  const { blockhash, lastValidBlockHeight } =
+    await fees.connection.getLatestBlockhash("confirmed");
+  const message = new TransactionMessage({
+    payerKey: ownerSigner.publicKey,
+    recentBlockhash: blockhash,
+    instructions: claim.instructions,
+  }).compileToV0Message();
+  const transaction = new VersionedTransaction(message);
+  transaction.sign([ownerSigner]);
+  const serialized = transaction.serialize();
+  if (serialized.length > MAX_TRANSACTION_BYTES) {
+    throw new Error(
+      `Fee claim transaction is ${serialized.length} bytes, exceeding Solana's ${MAX_TRANSACTION_BYTES}-byte limit`,
+    );
+  }
+  const signatureBytes = transaction.signatures[0];
+  if (!signatureBytes || signatureBytes.every((value) => value === 0)) {
+    throw new Error("Signed fee claim is missing its owner signature");
+  }
+
+  return {
+    fees,
+    owner: ownerSigner.publicKey,
+    transaction,
+    serialized,
+    signature: bs58.encode(signatureBytes),
+    blockhash,
+    lastValidBlockHeight,
+  };
+}
+
+export async function simulateFeeClaimOperation(
+  operation: FeeClaimOperation,
+): Promise<SimulatedTransactionResponse> {
+  const response = await operation.fees.connection.simulateTransaction(
+    operation.transaction,
+    {
+      commitment: "confirmed",
+      sigVerify: true,
+      replaceRecentBlockhash: false,
+    },
+  );
+  return response.value;
+}
+
+async function verifyFinalizedFeeClaim(
+  operation: FeeClaimOperation,
+): Promise<FeeClaimReceipt> {
+  const [positionState, positionNftTokenAccount] = await Promise.all([
+    operation.fees.cpAmm.fetchPositionState(METEORA_POSITION),
+    getAccount(
+      operation.fees.connection,
+      operation.fees.positionNftAccount,
+      "finalized",
+      TOKEN_2022_PROGRAM_ID,
+    ),
+  ]);
+  assertPublicKey(positionState.pool, METEORA_POOL, "Position pool");
+  assertPublicKey(positionState.nftMint, METEORA_POSITION_NFT, "Position NFT mint");
+  assertPublicKey(positionNftTokenAccount.owner, operation.owner, "Position NFT owner");
+  assertPublicKey(
+    positionNftTokenAccount.mint,
+    METEORA_POSITION_NFT,
+    "Position NFT account mint",
+  );
+  if (positionNftTokenAccount.amount !== 1n) {
+    throw new Error("Position NFT account does not hold exactly one token");
+  }
+  if (
+    !positionState.unlockedLiquidity.eq(
+      operation.fees.positionState.unlockedLiquidity,
+    ) ||
+    !positionState.vestedLiquidity.eq(
+      operation.fees.positionState.vestedLiquidity,
+    ) ||
+    !positionState.permanentLockedLiquidity.eq(
+      operation.fees.positionState.permanentLockedLiquidity,
+    )
+  ) {
+    throw new Error("Postcondition failed: fee claim changed position liquidity");
+  }
+
+  return {
+    signature: operation.signature,
+    position: METEORA_POSITION.toBase58(),
+    owner: operation.owner.toBase58(),
+  };
+}
+
+export async function submitFeeClaimOperation(
+  operation: FeeClaimOperation,
+): Promise<FeeClaimReceipt> {
+  const currentBlockHeight = await operation.fees.connection.getBlockHeight(
+    "confirmed",
+  );
+  if (currentBlockHeight > operation.lastValidBlockHeight) {
+    throw new Error("Simulated fee claim blockhash expired; rerun claim-fees");
+  }
+
+  let confirmation;
+  try {
+    const returnedSignature = await operation.fees.connection.sendRawTransaction(
+      operation.serialized,
+      {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+        maxRetries: 3,
+      },
+    );
+    if (returnedSignature !== operation.signature) {
+      throw new Error("RPC returned an unexpected transaction signature");
+    }
+    confirmation = await operation.fees.connection.confirmTransaction(
+      {
+        signature: operation.signature,
+        blockhash: operation.blockhash,
+        lastValidBlockHeight: operation.lastValidBlockHeight,
+      },
+      "finalized",
+    );
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Fee claim outcome for ${operation.signature} is unknown. Do not run claim-fees again until mainnet block height is above ${operation.lastValidBlockHeight} and the signature is still absent or failed at https://solscan.io/tx/${operation.signature}. Last error: ${message}`,
+    );
+  }
+  if (confirmation.value.err) {
+    throw new Error(
+      `Mainnet fee claim finalized with an error and was rolled back: ${JSON.stringify(confirmation.value.err)}`,
+    );
+  }
+
+  try {
+    return await verifyFinalizedFeeClaim(operation);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Fee claim ${operation.signature} finalized but position verification failed. Review it on Solscan; do not submit again. Last error: ${message}`,
+    );
+  }
 }
 
 export async function buildAtomicOperation(

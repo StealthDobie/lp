@@ -11,6 +11,8 @@
     "quote": "tsx src/cli.ts quote",
     "simulate": "tsx src/cli.ts simulate",
     "submit": "tsx src/cli.ts submit",
+    "fees": "tsx src/cli.ts fees",
+    "claim-fees": "tsx src/cli.ts claim-fees",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

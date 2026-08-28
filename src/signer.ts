@@ -9,7 +9,7 @@ export function loadOwnerKeypair(
   delete env.SOURCE_PRIVATE_KEY_BASE58;
   if (!encoded) {
     throw new Error(
-      "SOURCE_PRIVATE_KEY_BASE58 is required for simulate/submit",
+      "SOURCE_PRIVATE_KEY_BASE58 is required for signing commands",
     );
   }
 

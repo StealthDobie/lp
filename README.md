@@ -12,6 +12,8 @@ back to an unlocked two-transaction deposit.
 - DOBERMANN mint: `J3mfHoQb27xHL1xUYsoPfU1vZHbzCeK7fZYvsWeYdoge`
 - Meteora pool: `BRfodpEwqjjecN9u2i8mV6h6dT9ANbfG5hUeX76yPtkL`
 - Meteora DAMM v2 program: `cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG`
+- Vested position: `8MAizxPL7Umucyh58cE9XB7ntzGb26qV1LYFEpAXxf9M`
+- Position NFT mint: `AxSADS9W8MEGdtHptC1EPmU9FE8zqMgVK4DC6LebUv7Q`
 - Cluster: Solana mainnet-beta
 
 These values are intentionally compiled into the tool and revalidated from
@@ -42,7 +44,7 @@ Configure `.env`:
 ```dotenv
 SOLANA_RPC_URL=https://your-mainnet-rpc.example
 
-# Needed only by simulate/submit. Never commit .env; use chmod 600 .env.
+# Needed only by simulate/submit/claim-fees. Never commit .env; use chmod 600 .env.
 SOURCE_PRIVATE_KEY_BASE58=YourBase58Encoded64ByteKeypair
 EXPECTED_OWNER=YourExpectedOwnerPublicKey
 
@@ -50,11 +52,11 @@ DOBERMANN_AMOUNT=3000000
 VESTING_DAYS=90
 ```
 
-The tool decodes `SOURCE_PRIVATE_KEY_BASE58` only for `simulate` and `submit`,
-then removes it from the process environment. It must decode to a 64-byte Solana
-keypair whose public key matches `EXPECTED_OWNER`. That same owner must hold
-both the DOBERMANN and the quoted maximum SOL; the tool does not pull one side
-of the deposit from a second wallet.
+The tool decodes `SOURCE_PRIVATE_KEY_BASE58` only for signing commands, then
+removes it from the process environment. It must decode to a 64-byte Solana
+keypair whose public key matches `EXPECTED_OWNER`. For liquidity deposits, that
+same owner must hold both the DOBERMANN and the quoted maximum SOL; the tool does
+not pull one side of the deposit from a second wallet.
 
 ## Commands
 
@@ -120,6 +122,34 @@ Meteora before withdrawal. Vesting does not prevent fee collection.
 
 The position NFT controls the position. Funding the owner from another wallet
 publicly links those wallets on-chain.
+
+## Position fees
+
+Read the known vested position, verify its NFT owner, and report the currently
+claimable DOBERMANN and SOL without loading the signer:
+
+```bash
+pnpm fees
+```
+
+Build and sign a claim locally, simulate it with signature verification, then
+require an exact interactive mainnet confirmation before submitting the same
+bytes:
+
+```bash
+pnpm claim-fees
+```
+
+The claim destination is fixed to the position NFT owner; there is no receiver
+setting. The transaction claims all fees accrued when it executes, so the
+amounts in the confirmation phrase are a pre-execution snapshot and may increase
+slightly before finalization. Claiming fees does not remove liquidity or alter
+the vesting schedule, and the finalized postcondition verifies that the three
+liquidity balances are unchanged.
+
+If the RPC outcome is ambiguous, follow the printed signature and expiry-height
+instructions before retrying. `claim-fees` has no non-interactive confirmation
+mode.
 
 ## Development
 

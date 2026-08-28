@@ -53,7 +53,7 @@ export function parseConfig(
   }
   const expectedOwnerText = env.EXPECTED_OWNER?.trim() || null;
   if (requireSigner && !expectedOwnerText) {
-    throw new Error("EXPECTED_OWNER is required for simulate/submit");
+    throw new Error("EXPECTED_OWNER is required for signing commands");
   }
 
   let expectedOwner: PublicKey | null = null;

@@ -12,6 +12,14 @@ export const METEORA_CP_AMM_PROGRAM = new PublicKey(
   "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG",
 );
 
+export const METEORA_POSITION = new PublicKey(
+  "8MAizxPL7Umucyh58cE9XB7ntzGb26qV1LYFEpAXxf9M",
+);
+
+export const METEORA_POSITION_NFT = new PublicKey(
+  "AxSADS9W8MEGdtHptC1EPmU9FE8zqMgVK4DC6LebUv7Q",
+);
+
 export const MAINNET_GENESIS_HASH =
   "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 export const EXPECTED_DOBERMANN_DECIMALS = 9;
