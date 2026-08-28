@@ -84,11 +84,18 @@ export type PositionFees = {
   connection: Connection;
   cpAmm: CpAmm;
   poolState: PoolState;
+  position: PublicKey;
   positionState: PositionState;
+  positionNft: PublicKey;
   tokenAProgram: PublicKey;
   tokenBProgram: PublicKey;
   positionNftAccount: PublicKey;
   owner: PublicKey;
+  claimableDobermann: BN;
+  claimableSol: BN;
+};
+
+export type FeeTotals = {
   claimableDobermann: BN;
   claimableSol: BN;
 };
@@ -108,6 +115,22 @@ export type FeeClaimReceipt = {
   position: string;
   owner: string;
 };
+
+export function aggregatePositionFees(
+  positions: ReadonlyArray<
+    Pick<PositionFees, "claimableDobermann" | "claimableSol">
+  >,
+): FeeTotals {
+  return positions.reduce<FeeTotals>(
+    (totals, position) => ({
+      claimableDobermann: totals.claimableDobermann.add(
+        position.claimableDobermann,
+      ),
+      claimableSol: totals.claimableSol.add(position.claimableSol),
+    }),
+    { claimableDobermann: new BN(0), claimableSol: new BN(0) },
+  );
+}
 
 function assertPublicKey(
   actual: PublicKey,
@@ -241,7 +264,7 @@ export async function prepareQuote(config: AppConfig): Promise<PreparedQuote> {
 
 export async function inspectPositionFees(
   config: AppConfig,
-): Promise<PositionFees> {
+): Promise<PositionFees[]> {
   const connection = new Connection(config.rpcUrl, {
     commitment: "confirmed",
     confirmTransactionInitialTimeout: 60_000,
@@ -250,7 +273,9 @@ export async function inspectPositionFees(
   const poolState = await verifyMainnetAndPool(connection, cpAmm);
   const tokenAProgram = getTokenProgram(poolState.tokenAFlag);
   const tokenBProgram = getTokenProgram(poolState.tokenBFlag);
-  const positionNftAccount = derivePositionNftAccount(METEORA_POSITION_NFT);
+  const knownPositionNftAccount = derivePositionNftAccount(
+    METEORA_POSITION_NFT,
+  );
 
   assertPublicKey(
     derivePositionAddress(METEORA_POSITION_NFT),
@@ -259,17 +284,15 @@ export async function inspectPositionFees(
   );
 
   const [
-    positionState,
-    positionNftTokenAccount,
+    knownPositionNftTokenAccount,
     tokenAMint,
     tokenBMint,
     tokenAVault,
     tokenBVault,
   ] = await Promise.all([
-    cpAmm.fetchPositionState(METEORA_POSITION),
     getAccount(
       connection,
-      positionNftAccount,
+      knownPositionNftAccount,
       "confirmed",
       TOKEN_2022_PROGRAM_ID,
     ),
@@ -279,12 +302,10 @@ export async function inspectPositionFees(
     getAccount(connection, poolState.tokenBVault, "confirmed", tokenBProgram),
   ]);
 
-  assertPublicKey(positionState.pool, METEORA_POOL, "Position pool");
-  assertPublicKey(positionState.nftMint, METEORA_POSITION_NFT, "Position NFT mint");
   assertPublicKey(
-    positionNftTokenAccount.mint,
+    knownPositionNftTokenAccount.mint,
     METEORA_POSITION_NFT,
-    "Position NFT account mint",
+    "Known position NFT account mint",
   );
   assertPublicKey(tokenAVault.mint, DOBERMANN_MINT, "Token A vault mint");
   assertPublicKey(tokenBVault.mint, NATIVE_MINT, "Token B vault mint");
@@ -298,33 +319,90 @@ export async function inspectPositionFees(
       `Wrapped SOL decimals changed from ${EXPECTED_SOL_DECIMALS} to ${tokenBMint.decimals}`,
     );
   }
-  if (positionNftTokenAccount.amount !== 1n) {
-    throw new Error("Position NFT account does not hold exactly one token");
+  if (knownPositionNftTokenAccount.amount !== 1n) {
+    throw new Error(
+      "Known position NFT account does not hold exactly one token",
+    );
   }
-  if (positionNftTokenAccount.delegate !== null) {
-    throw new Error("Position NFT has a delegate; refusing to claim fees");
+  if (knownPositionNftTokenAccount.delegate !== null) {
+    throw new Error("Known position NFT has a delegate; refusing to claim fees");
   }
   if (config.expectedOwner) {
     assertPublicKey(
-      positionNftTokenAccount.owner,
+      knownPositionNftTokenAccount.owner,
       config.expectedOwner,
-      "Position NFT owner",
+      "Known position NFT owner",
     );
   }
 
-  const unclaimed = getUnClaimLpFee(poolState, positionState);
-  return {
-    connection,
-    cpAmm,
-    poolState,
-    positionState,
-    tokenAProgram,
-    tokenBProgram,
-    positionNftAccount,
-    owner: positionNftTokenAccount.owner,
-    claimableDobermann: unclaimed.feeTokenA,
-    claimableSol: unclaimed.feeTokenB,
-  };
+  const owner = knownPositionNftTokenAccount.owner;
+  const userPositions = await cpAmm.getUserPositionByPool(METEORA_POOL, owner);
+  if (userPositions.length === 0) {
+    throw new Error("Position owner has no positions in the configured pool");
+  }
+
+  const positions = await Promise.all(
+    userPositions.map(
+      async ({ position, positionNftAccount, positionState }) => {
+        assertPublicKey(positionState.pool, METEORA_POOL, "Position pool");
+        assertPublicKey(
+          derivePositionAddress(positionState.nftMint),
+          position,
+          "Derived position",
+        );
+        const positionNftTokenAccount = await getAccount(
+          connection,
+          positionNftAccount,
+          "confirmed",
+          TOKEN_2022_PROGRAM_ID,
+        );
+        assertPublicKey(
+          positionNftTokenAccount.mint,
+          positionState.nftMint,
+          "Position NFT account mint",
+        );
+        assertPublicKey(
+          positionNftTokenAccount.owner,
+          owner,
+          "Position NFT owner",
+        );
+        if (positionNftTokenAccount.amount !== 1n) {
+          throw new Error("Position NFT account does not hold exactly one token");
+        }
+        if (positionNftTokenAccount.delegate !== null) {
+          throw new Error("Position NFT has a delegate; refusing to claim fees");
+        }
+
+        const unclaimed = getUnClaimLpFee(poolState, positionState);
+        return {
+          connection,
+          cpAmm,
+          poolState,
+          position,
+          positionState,
+          positionNft: positionState.nftMint,
+          tokenAProgram,
+          tokenBProgram,
+          positionNftAccount,
+          owner,
+          claimableDobermann: unclaimed.feeTokenA,
+          claimableSol: unclaimed.feeTokenB,
+        };
+      },
+    ),
+  );
+  const knownPosition = positions.find((fees) =>
+    fees.position.equals(METEORA_POSITION),
+  );
+  if (!knownPosition) {
+    throw new Error("Known vested position was not returned for its NFT owner");
+  }
+  assertPublicKey(
+    knownPosition.positionNft,
+    METEORA_POSITION_NFT,
+    "Known position NFT mint",
+  );
+  return positions;
 }
 
 export async function buildFeeClaimOperation(
@@ -338,7 +416,7 @@ export async function buildFeeClaimOperation(
 
   const claim = await fees.cpAmm.claimPositionFee({
     owner: ownerSigner.publicKey,
-    position: METEORA_POSITION,
+    position: fees.position,
     pool: METEORA_POOL,
     positionNftAccount: fees.positionNftAccount,
     tokenAMint: fees.poolState.tokenAMint,
@@ -397,7 +475,7 @@ async function verifyFinalizedFeeClaim(
   operation: FeeClaimOperation,
 ): Promise<FeeClaimReceipt> {
   const [positionState, positionNftTokenAccount] = await Promise.all([
-    operation.fees.cpAmm.fetchPositionState(METEORA_POSITION),
+    operation.fees.cpAmm.fetchPositionState(operation.fees.position),
     getAccount(
       operation.fees.connection,
       operation.fees.positionNftAccount,
@@ -406,11 +484,19 @@ async function verifyFinalizedFeeClaim(
     ),
   ]);
   assertPublicKey(positionState.pool, METEORA_POOL, "Position pool");
-  assertPublicKey(positionState.nftMint, METEORA_POSITION_NFT, "Position NFT mint");
-  assertPublicKey(positionNftTokenAccount.owner, operation.owner, "Position NFT owner");
+  assertPublicKey(
+    positionState.nftMint,
+    operation.fees.positionNft,
+    "Position NFT mint",
+  );
+  assertPublicKey(
+    positionNftTokenAccount.owner,
+    operation.owner,
+    "Position NFT owner",
+  );
   assertPublicKey(
     positionNftTokenAccount.mint,
-    METEORA_POSITION_NFT,
+    operation.fees.positionNft,
     "Position NFT account mint",
   );
   if (positionNftTokenAccount.amount !== 1n) {
@@ -432,7 +518,7 @@ async function verifyFinalizedFeeClaim(
 
   return {
     signature: operation.signature,
-    position: METEORA_POSITION.toBase58(),
+    position: operation.fees.position.toBase58(),
     owner: operation.owner.toBase58(),
   };
 }
