@@ -11,14 +11,13 @@ import {
   LIQUIDITY_SLIPPAGE_BPS,
   METEORA_CP_AMM_PROGRAM,
   METEORA_POOL,
-  METEORA_POSITION,
-  METEORA_POSITION_NFT,
 } from "./constants";
 import {
   type AtomicOperation,
   type FeeClaimOperation,
   type PositionFees,
   type PreparedQuote,
+  aggregatePositionFees,
   buildAtomicOperation,
   buildFeeClaimOperation,
   inspectPositionFees,
@@ -82,23 +81,35 @@ function printOperation(operation: AtomicOperation): void {
   console.log(`Last valid block height: ${operation.lastValidBlockHeight}`);
 }
 
-function printPositionFees(fees: PositionFees): void {
+function printPositionFees(positions: PositionFees[]): void {
+  const totals = aggregatePositionFees(positions);
   console.log("StealthDobie position fees");
   console.log("Cluster: mainnet-beta");
   console.log(`Meteora program: ${METEORA_CP_AMM_PROGRAM.toBase58()}`);
   console.log(`Pool: ${METEORA_POOL.toBase58()}`);
-  console.log(`Position: ${METEORA_POSITION.toBase58()}`);
-  console.log(`Position NFT mint: ${METEORA_POSITION_NFT.toBase58()}`);
-  console.log(`Position NFT owner: ${fees.owner.toBase58()}`);
+  console.log(`Position NFT owner: ${positions[0]?.owner.toBase58()}`);
+  console.log(`Positions: ${positions.length}`);
+  for (const [index, fees] of positions.entries()) {
+    console.log(`\nPosition ${index + 1}: ${fees.position.toBase58()}`);
+    console.log(`Position NFT mint: ${fees.positionNft.toBase58()}`);
+    console.log(
+      `Claimable DOBERMANN: ${formatUiAmount(fees.claimableDobermann, EXPECTED_DOBERMANN_DECIMALS)}`,
+    );
+    console.log(
+      `Claimable SOL: ${formatUiAmount(fees.claimableSol, EXPECTED_SOL_DECIMALS)}`,
+    );
+  }
+  console.log("\nTotals");
   console.log(
-    `Claimable DOBERMANN: ${formatUiAmount(fees.claimableDobermann, EXPECTED_DOBERMANN_DECIMALS)}`,
+    `Claimable DOBERMANN: ${formatUiAmount(totals.claimableDobermann, EXPECTED_DOBERMANN_DECIMALS)}`,
   );
   console.log(
-    `Claimable SOL: ${formatUiAmount(fees.claimableSol, EXPECTED_SOL_DECIMALS)}`,
+    `Claimable SOL: ${formatUiAmount(totals.claimableSol, EXPECTED_SOL_DECIMALS)}`,
   );
 }
 
 function printFeeClaimOperation(operation: FeeClaimOperation): void {
+  console.log(`Position: ${operation.fees.position.toBase58()}`);
   console.log(`Transaction signature: ${operation.signature}`);
   console.log(`Last valid block height: ${operation.lastValidBlockHeight}`);
 }
@@ -135,7 +146,7 @@ function confirmationPhrase(operation: AtomicOperation): string {
 function feeClaimConfirmationPhrase(operation: FeeClaimOperation): string {
   const owner = operation.owner.toBase58();
   const pool = METEORA_POOL.toBase58();
-  const position = METEORA_POSITION.toBase58();
+  const position = operation.fees.position.toBase58();
   const dobermann = formatUiAmount(
     operation.fees.claimableDobermann,
     EXPECTED_DOBERMANN_DECIMALS,
@@ -176,8 +187,8 @@ async function main(): Promise<void> {
   }
 
   if (command === "fees" || command === "claim-fees") {
-    const fees = await inspectPositionFees(config);
-    printPositionFees(fees);
+    const positions = await inspectPositionFees(config);
+    printPositionFees(positions);
     if (command === "fees") {
       console.log("\nRead-only fee inspection complete. No signer was loaded.");
       return;
@@ -186,28 +197,38 @@ async function main(): Promise<void> {
     if (!owner) {
       throw new Error("Signing configuration was not loaded");
     }
-    const operation = await buildFeeClaimOperation(fees, owner);
-    printFeeClaimOperation(operation);
-    const simulation = await simulateFeeClaimOperation(operation);
-    if (simulation.err) {
-      const logs = (simulation.logs ?? [])
-        .slice(-20)
-        .map(sanitizeLog)
-        .join("\n");
-      throw new Error(
-        `Simulation failed: ${JSON.stringify(simulation.err)}${logs ? `\n${logs}` : ""}`,
-      );
+    const claimablePositions = positions.filter(
+      (fees) =>
+        !fees.claimableDobermann.isZero() || !fees.claimableSol.isZero(),
+    );
+    if (claimablePositions.length === 0) {
+      console.log("No fees to claim. No transaction was submitted.");
+      return;
     }
-    console.log(
-      `Simulation succeeded; compute units consumed: ${simulation.unitsConsumed ?? "unavailable"}`,
-    );
-    await confirmMainnet(
-      "This will claim all accrued fees to the position NFT owner on mainnet-beta without changing liquidity or vesting.",
-      feeClaimConfirmationPhrase(operation),
-    );
-    const receipt = await submitFeeClaimOperation(operation);
-    console.log("Finalized and verified:");
-    console.log(JSON.stringify(receipt, null, 2));
+    for (const fees of claimablePositions) {
+      const operation = await buildFeeClaimOperation(fees, owner);
+      printFeeClaimOperation(operation);
+      const simulation = await simulateFeeClaimOperation(operation);
+      if (simulation.err) {
+        const logs = (simulation.logs ?? [])
+          .slice(-20)
+          .map(sanitizeLog)
+          .join("\n");
+        throw new Error(
+          `Simulation failed for position ${fees.position.toBase58()}: ${JSON.stringify(simulation.err)}${logs ? `\n${logs}` : ""}`,
+        );
+      }
+      console.log(
+        `Simulation succeeded; compute units consumed: ${simulation.unitsConsumed ?? "unavailable"}`,
+      );
+      await confirmMainnet(
+        "This will claim all accrued fees for this position to its NFT owner on mainnet-beta without changing liquidity or vesting.",
+        feeClaimConfirmationPhrase(operation),
+      );
+      const receipt = await submitFeeClaimOperation(operation);
+      console.log("Finalized and verified:");
+      console.log(JSON.stringify(receipt, null, 2));
+    }
     return;
   }
 
